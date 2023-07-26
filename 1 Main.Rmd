@@ -11,7 +11,7 @@ knitr::opts_chunk$set(
 	warning = FALSE
 )
 rm(list=ls())
-wd            <- "C:/Users/87375emi/OneDrive - Erasmus University Rotterdam/Documents/Thesis/Reports and documentation/End Presentation/Submission/Preventative Medicine/Paper/"
+wd            <- "C:/Example directory/"
 library("pacman")
 p_load("dplyr","e1071","lmtest","readxl","lme4","tidyverse","car","gplots","gdata","matlib","quadprog","ggthemes","mcompanion","expm","pracma","mgcv","matrixcalc","gamlss","tseries","forecast",install = FALSE)
 source(paste(wd,"/functions/supporting_functions.R",sep=""))
@@ -266,7 +266,7 @@ plot <- rbind(plot,get)
 
 ```{r Prevalence - as a total probability}
 names.plots.figure <- c("Childhood \nScenario","Adulthood \nScenario","Combination \nScenario")
-v_ylim <- c(82,30) 
+v_ylim <- c(82,20) 
 v_what <- c(4,2)
 plotsex <- "Male"
 v_label <- c("Prevalence of unhealthy BMI","Diabetes mellitus prevalence",names.plots.figure)
@@ -283,119 +283,9 @@ m <- matrix(data = c(1,2,0,
                     8,11,5),4,3,byrow = TRUE)
 
 
-png(file = paste(wd,"/Scenarios_results_DMprev_ATTICA_Adjusted",plotsex,".png",sep=""),width = 8, height = 10, units = "in", res = 96)
+png(file = paste(wd,"/Scenarios_results_DMprev_ATTICA_Adjusted",plotsex,".png",sep=""),width = 8, height = 10, units = "in", res = 300)
 #setEPS()
-#postscript(paste(wd,"/Scenarios_results_Female.eps",sep=""),width = 10, height = 12)
-
-par(oma=c(3,3,0,0))
-layout(m, widths = c(15,20,2), heights = c(1,rep(9,3)) )
-
-par(mar = c(0, 0, 0, 0))
-
-for (i in 1:2) {
-  plot.new()
-  text(x=0.55,y=0.5,labels = v_label[i],xpd = F,cex = 1.2,font = 2)
-  box(col = "grey",which = "figure")
-}
-
-for (i in 3:5) {
-  plot.new()
-  text(x=0.5,y=0.5,labels = v_label[i],xpd = F,srt = 90,cex = 1.7,font = 2)
-  box(col = "grey",which = "figure")
-}
-
-
-par(mar = c(2.5, 3, 1, 0.5)) #mar=c(5.1, 4.1, 4.1, 2.1)
-for (w in 1:2) {
-  for (i in 1:3) {
-    
-    sub <- plot[plot$what == what[v_what[w]] & plot$sex == plotsex & plot$typeof == names.plots[i],]
-    if (i == 1) {
-      which_col <- expression(`prevalence change`)
-      which_i <- levels(sub$`prevalence change`)
-      } else {
-        which_col <- expression(`risk change`)
-        which_i <- levels(sub$`risk change`)
-      }
-    
-    v_lty <- c(1,3,2,4,3)
-    
-    #if (i==3) {
-     # v_lty <- v_lty[-2]
-    #} 
-  
-  with(sub,{
-     plot(x=age[eval(which_col) == "Baseline"], 
-          y = value[eval(which_col) == "Baseline"], 
-          type = "l",
-          lwd = 3,
-          ylim = range(c(0,v_ylim[w])),
-          xlab = "",ylab = "",
-          cex.axis = 1.3)
-    for (ii in 2:length(which_i)) {
-      n <- length(age[eval(which_col) == which_i[ii]])
-      v_seq <- eval(ifelse(n>81,expression(c(81,162)),81))
-      for (iii in v_seq) {
-        lines(x = age[eval(which_col) == which_i[ii]][(iii-80):iii], 
-              y = value[eval(which_col) == which_i[ii]][(iii-80):iii],
-              type="l",
-              lty = ifelse(iii==162,3,v_lty[ii]), 
-              pch = ii, 
-              #col = ifelse(which_i[ii] == "+35%","dark red","dark green"),
-              lwd = 2)
-    }
-    grid()
-    box(col = "grey",which = "figure")
-
-    
-    if (w!=1) {
-          
-    legend("topleft",title = v_title[i],legend = v_legend[[i]], cex = 1.1, 
-           lty = eval(ifelse(i==3,expression(v_lty[-2]),expression(v_lty))),
-           bg="transparent",
-           bty = "n",
-           inset = ifelse(i!=3,0.04,0),
-           #col = c("black","dark green",paste("dark",v_col_legend[ifelse(i!=3,1,2)]),"dark red"),
-           lwd = 2)
-      }
-      }
-    })
-  }
-}
-
-mtext("Age (years)",side=1,line=0.8,outer=TRUE,cex=1.2)
-mtext("Prevalence (%)",side=2,line=0.8,outer=TRUE,cex=1.2,las = 0)
-
-#plot.new()
-#legend("center",legend=c("-10%","-50%","-100%"), title = "Legend \nReduction of \nprevalence (a)")
-
-dev.off()
-
-
-```
-
-```{r Prevalence - conditional on survival}
-names.plots.figure <- c("Childhood \nScenario","Adulthood \nScenario","Combination \nScenario")
-v_ylim <- c(80,50) 
-v_what <- c(5,1)
-plotsex <- "Male"
-v_label <- c("Prevalence of unhealthy BMI","Diabetes mellitus prevalence",names.plots.figure)
-v_title <- c("Reduction of obesity \nprevalence at 20 (a)","Change in obesity \nincidence (b)","Combination of (a) and (b)")
-v_legend <- list(c("Baseline","-50%","-100%"), #"-10%",
-                 c("Baseline","-50%","-100%","+35%"),
-                 c("Baseline","No obesity","-50%(a) & +35%(b)","-100%(a) & +35%(b)"))
-#v_col_legend <- c("green","red")
-
-
-m <- matrix(data = c(1,2,0,
-                     6,9,3,
-                     7,10,4,
-                    8,11,5),4,3,byrow = TRUE)
-
-
-png(file = paste(wd,"/Scenarios_results_DMprevalive_ATTICA_",plotsex,".png",sep=""),width = 8, height = 10, units = "in", res = 96)
-#setEPS()
-#postscript(paste(wd,"/Scenarios_results_Female.eps",sep=""),width = 10, height = 12)
+#postscript(paste(wd,"/Scenarios_results",plotsex,".eps",sep=""),width = 10, height = 12)
 
 par(oma=c(3,3,0,0))
 layout(m, widths = c(15,20,2), heights = c(1,rep(9,3)) )
@@ -477,7 +367,6 @@ mtext("Age (years)",side=1,line=0.8,outer=TRUE,cex=1.2)
 mtext("Prevalence (%)",side=2,line=0.8,outer=TRUE,cex=1.2,las = 0)
 
 dev.off()
-
 
 ```
 
