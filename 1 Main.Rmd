@@ -1,0 +1,607 @@
+---
+title: "Health outcomes in Bulgaria: simulated effects of obesogenic environmental changes in adulthood versus childhood"
+output: word_document
+autor: Elena Milkovska, Pieter van Baal
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+rm(list=ls())
+wd            <- "C:/Users/87375emi/OneDrive - Erasmus University Rotterdam/Documents/Thesis/Reports and documentation/End Presentation/Submission/Preventative Medicine/Paper/"
+library("pacman")
+p_load("dplyr","e1071","lmtest","readxl","lme4","tidyverse","car","gplots","gdata","matlib","quadprog","ggthemes","mcompanion","expm","pracma","mgcv","matrixcalc","gamlss","tseries","forecast",install = FALSE)
+source(paste(wd,"/functions/supporting_functions.R",sep=""))
+```
+
+
+```{r Set parameters & Get Model transitions}
+v_sex         <- c("Female","Male")
+le            <- c("LE","DFLE")
+start_age     <- 20
+input_year    <- 2022
+v_age         <- start_age:100
+sens_analysis <- FALSE
+
+getModelTransitions(sens_analysis = sens_analysis,    # Default is FALSE
+                    what = NULL,                      # Default is NULL. Applicable only when sens_analysis is TRUE 
+                                                      # Takes values: 1- mortality, 2-DM prevalence 3-DM incidence 4-RR 5-SMR. 
+                    
+                    change = NULL,                    # Default is NULL. Applicable only when sens_analysis is TRUE 
+                                                      # Values under 1 decrease the estimates, and above 1 are an increase them. 
+                                                      # Example: a value 1.1 increases the base value by 10%
+                    
+                    inc_adjust = NULL)                # Default is NULL. Independent of sens_analysis.
+                                                      # A vector to increase/decrease the diabetes incidence. First value is for Men, second - for Women. 
+                                                      # Example: c(2,1.5) will increase the DM incidence by 200% for men, and by 150% percent for women.
+```
+
+
+#01 Set up scenarios and run cohort
+
+```{r Setup parameters}
+##### Define the parameters
+v_prev_change <- c(1,0.9,0.75,0.5,0)     # A vector of values, can take values [0,Inf). 
+                                                    # A value of 1 means no adjustment is applied to the RF structure at age 20.
+                                                    # A value <1 means that the overweight/obesity BMI prevalence at age 20 is lowered. 
+                                                          # Example: 0.9 = 10% reduction .
+                                                    # A value >1 means that the overweight/obesity BMI prevalence at age 20 is increased.                                                                                                      # Example: 1.15 = 15% increase.
+v_risk_change <- c(1,1.1,1.2,1.35,1.5 )  # A vector of values, can take values [0,Inf). 
+                                                    # A value of 1 means no adjustment is applied to the risk of overweight/obesity between ages 20-65.
+                                                    # A value <1 means that the risk of overweight/obesity between 20-65 is lowered. 
+                                                          # Example: 0.9 = 10% reduction.
+                                                    # A value >1 means that the risk of overweight/obesity between 20-65 is increased.                                                                                                         # Example: 1.15 = 15% increase.
+n_row <- length(v_prev_change)       #number of prevalence change interventions
+n_col <- length(v_risk_change)       #number of risk change interventions
+n <- n_col*n_row                     #Total number of rounds. Used to track progress during code run.
+
+##### Create intervention names from the input parameters
+v_row_names <- ifelse(v_prev_change < 1,
+                          paste("-",(1-v_prev_change)*100,"%",sep=""),
+                          ifelse(v_prev_change==1,
+                                 paste(abs((1-v_prev_change))*100,"%",sep=""),
+                                 paste("+",abs((1-v_prev_change))*100,"%",sep="")))
+v_col_names <- ifelse(v_risk_change < 1,
+                          paste("-",(1-v_risk_change)*100,"%",sep=""),
+                          ifelse(v_risk_change==1 ,
+                                 paste(abs((1-v_risk_change))*100,"%",sep=""),
+                                 paste("+",abs((1-v_risk_change))*100,"%",sep="")))
+    
+##### Create arrays to store the end results
+    #res_array stores the LE and DFLE values from each intervention
+res_array     <- array(dim = c(n_row,2,n_col,2),dimnames = list(v_row_names,  #rows = childhood interventions
+                                                                le,           #naming the columns LE and DFLE
+                                                                v_col_names,  #cols = adulthood interventions
+                                                                v_sex))       #For women and men separately
+    
+    #disease_array stores the prevalence/incidence respectively from each intervention
+disease_array <- array(dim = c(length(v_age),n_row*n_col,2,5),
+                           dimnames = list(v_age,                                                 # for all ages since start_age
+                                           paste(rep(v_row_names,                                 # columns = different intervention combinations
+                                                     each=n_col),"&",v_col_names),
+                                           v_sex,                                                 # For women and men separately
+                                           c("prob","inc","prev","RF_prev","RF_prev_alive")))     # Type of metric stored                
+    #pop stores the temporary population (sum of no, ow, ob) values
+pop           <- array(dim=c(length(v_age),6,2), dimnames = list(v_age,           # rows = childhood interventions
+                                                           c("healthy",           # cols = First 3 are the model health states, next - incidence, OS, and DFS 
+                                                             "diabetic",
+                                                             "dead",
+                                                             "incidence","OS","DFS"),
+                                                           v_sex))                # For women and men separately
+
+RF_array <- array(dim=c(3,2,3,n_row*n_col),dimnames = list(c(20,60,100),
+                                                           v_sex,
+                                                           c("no","ow","ob"),
+                                                           paste(rep(v_row_names,each=n_col),"&",v_col_names)
+                                                           ))
+
+```
+
+
+```{r Run cohort  }
+
+     ##### Run cohort    
+for (i in 1:n_col) {                  #n_col = the number of risk changes (# of childhood interventions)
+  for (ii in 1:n_row) {               #n_row = the number of prevalence changes (# of adulthood interventions)
+          
+          #Define Intervention prevalence/risk change and run cohort
+          coh <- runCohortBMI(sens_analysis = sens_analysis,
+                              start_age = 20,
+                              input_year = input_year,
+                              prev_change = v_prev_change[ii],
+                              risk_change = v_risk_change[i])
+          
+          
+          
+          #Record RF prevalence
+          RF_array[,,"no",paste(v_row_names[ii],"&",v_col_names[i])] <- coh[c("20","60","100"),"healthy","no",] + coh[c("20","60","100"),"diabetic","no",]
+          RF_array[,,"ow",paste(v_row_names[ii],"&",v_col_names[i])] <- coh[c("20","60","100"),"healthy","ow",] + coh[c("20","60","100"),"diabetic","ow",]
+          RF_array[,,"ob",paste(v_row_names[ii],"&",v_col_names[i])] <- coh[c("20","60","100"),"healthy","ob",] + coh[c("20","60","100"),"diabetic","ob",]
+          
+          #Calculate intervention LE and DFLE
+          pop[,1:4,] <- coh[,,"no",] + coh[,,"ow",] + coh[,,"ob",]                  #Sum up all BMI states to get the population values
+          pop[,"OS",] <- 1 - pop[,"dead",]                                          #OS is the inverse of death CDF (1-#dead)
+          pop[,"DFS",]  <- 1 - (pop[,"diabetic",] +                                 #DFS is the inverse of death CDF + diabetics (1-#dead-#sick)
+                                  pop[,"dead",])
+          
+          #Record probability for disease for each intervention combination
+          disease_array[,paste(v_row_names[ii],"&",
+                               v_col_names[i]),,"prob"] <- pop[,"diabetic",] / pop[,"OS",]    #Disease probability for disease is #sick / #total survivors 
+          
+          #Record incidence for each intervention combination
+          disease_array[,paste(v_row_names[ii],"&",
+                               v_col_names[i]),,"inc"] <- (pop[,"incidence",] / #Disease incidence rate (t) per 1000 is the number newly diseased in t out of mid-population between t and t+1
+                                                          ((lag((pop[,"healthy",] + pop[,"diabetic",])) +    # sick / (#total survivors(t-1) + #total survivors(t)) / 2
+                                                          (pop[,"healthy",] + pop[,"diabetic",]))*0.5)) * 10
+          
+          #Record prevalence for each intervention combination
+          disease_array[,paste(v_row_names[ii],"&",
+                               v_col_names[i]),,"prev"] <- pop[,"diabetic",]        #sick at t is the disease prevalence
+          
+          #Record LE and DFLE for each intervention combination
+          res_array[ii,,i,] <- rbind(colSums(pop[,"OS",]),colSums(pop[,"DFS",]))    #LE is the sum of OS, DFLE is sum of DFS across all t.
+          
+          temp <- coh[,1:3,"ow",] + coh[,1:3,"ob",]
+          
+          #Record RF-prevalence - unconditional 
+          disease_array[,paste(v_row_names[ii],"&",
+                               v_col_names[i]),,"RF_prev"] <- cbind(rowSums(temp[,,"Female"]),rowSums(temp[,,"Male"]))
+          
+          #Record RF-prevalence - conditional on survival
+          disease_array[,paste(v_row_names[ii],"&",
+                               v_col_names[i]),,"RF_prev_alive"] <- cbind(rowSums(temp[,1:2,"Female"]),rowSums(temp[,1:2,"Male"]))
+          }
+}
+
+
+```
+
+
+
+#02 Review results
+
+
+```{r Results}
+
+res_array          # 1st dimension: rows = childhood interventions 
+                   # 2nd dimension: cols = always two showing LE and DFLE for each scenario. A row named "0%" means no modification was made to the RF start vector
+                   # 3rd dimension: adulthood interventions. A dimension named "0%" means no modification was made to the risk of obesity between ages 20-6
+                   # If both the row and the 3rd dimension are named "0%" means that these LE/DFLE are the baseline values.
+                   # 4th dimension: sex
+                   
+disease_array      # 1st dimension: rows = for all ages since start_age
+                   # 2nd dimension: cols = different intervention combinations. 
+                            # The first value in the name is the percentage change applied to the RF structure at the start of the cohort 
+                            # The second value in the name is the percentage change applied to the risk of obesity between ages 20-65. 
+                            # Example:    "0% & 0%" is baseline
+                                        # "-10% & 0%" means that the at age 20 the prevalence of overweight/obesity was lowered by 10%.
+                                        # "0% & -10%" means that the risk of overweight/obesity between 20-65 years of age was lowered by 10%.
+                   # 3rd dimension: sex
+                   # 4th dimension: One of the following c("prob","inc","prev","RF_prev","RF_prev_alive") for:
+                            # prob - probability to be sick with DM conditional on survival
+                            # inc  - observed DM incidence as produced by the cohort run
+                            # prev - probability to be sick with DM independent of survival
+                            # RF_prev - probability for having unhealthy BMI independent of survival 
+                            # RF_prev_alive - probability for having unhealthy BMI conditional of survival 
+
+P_array <- readRDS(file= paste(wd,"P_array.RData",sep="")) # Contains the transition matrices between health states. The matrices are age-, year-, BMI- and sex-specific
+                                                           # dimensions=c(3,3,age,year,BMI,sex)
+
+M_array <- readRDS(file = paste(wd,"P1matrix_Male_2022.RData",sep="")) # Contains the BMI transition matrices for men of the input year.
+                                                                       # The same is available for women under the name "P1matrix_Female_2022"
+```
+
+
+
+#03 Plot Results
+
+
+## Plotting All selected scenarios 
+
+```{r Prepare df for plotting}
+
+what <- c("prob","prev","inc","RF_prev","RF_prev_alive")
+
+for (i in 1:length(what)) {
+  res <- as.data.frame(disease_array[,,,what[i]])
+  res$age <- rownames(res)
+  lastcol <- dim(res)[2]
+  res <- res %>% pivot_longer(everything()[-lastcol],
+                                    names_to = c("prevalence change","risk change","sex"),
+                                    names_pattern = "(.*) & (.*)\\.(.*)")
+  res$value <- round(res$value,3)
+  res$`prevalence change`[res$`prevalence change` == "0%"] <- "Baseline"
+  res$`risk change`[res$`risk change` == "0%"] <- "Baseline"
+  res$what <- what[i]
+  if (i==1) {
+    plot <- res
+  } else {
+    plot <- rbind(plot,res)
+  }
+}
+
+keep_scenarios <- cbind(c("Baseline","Baseline"),
+                        c("Baseline","-50%"),
+                        c("Baseline","-100%"),
+                        c("Baseline","+35%"),
+                        c("-50%","Baseline"),
+                        c("-100%","Baseline"),
+                        c("-100%","-100%"),
+                        c("-50%","+35%"),
+                        c("-100%","+35%"))
+for (i in 1:dim(keep_scenarios)[2]) {
+  n <- which(with(plot,
+     `prevalence change` %in% keep_scenarios[1,i] &
+       `risk change` %in% keep_scenarios[2,i]
+     ))
+  if (i==1) {
+    v_n <- n
+  } else {
+      v_n <- c(v_n,n)
+      }
+}
+plot <- plot[v_n,]
+plot$`prevalence change` <- factor(plot$`prevalence change`,levels = unique(plot$`prevalence change`))
+plot$`risk change` <- factor(plot$`risk change`,levels = unique(plot$`risk change`))
+plot$what <- factor(plot$what,levels = what)
+plot$sex <- factor(plot$sex,levels = v_sex)
+plot$value <- plot$value * 100
+names.plots <- c("Childhood Scenario","Adulthood Scenario","Combination Scenario")
+plot$typeof <- names.plots[3]
+plot$typeof[plot$`prevalence change` != "Baseline" & plot$`risk change` == "Baseline"] <- names.plots[1]
+plot$typeof[plot$`prevalence change` == "Baseline" & plot$`risk change` != "Baseline"] <- names.plots[2]
+plot$typeof <- factor(plot$typeof,levels = names.plots)
+get <- plot[plot$`prevalence change` == "Baseline" & plot$`risk change` == "Baseline",]
+get$typeof <- names.plots[1]
+plot <- rbind(plot,get)
+get$typeof <- names.plots[2]
+plot <- rbind(plot,get)
+
+
+```
+
+
+```{r Prevalence - as a total probability}
+names.plots.figure <- c("Childhood \nScenario","Adulthood \nScenario","Combination \nScenario")
+v_ylim <- c(82,30) 
+v_what <- c(4,2)
+plotsex <- "Male"
+v_label <- c("Prevalence of unhealthy BMI","Diabetes mellitus prevalence",names.plots.figure)
+v_title <- c("Reduction of obesity \nprevalence at 20 (a)","Change in obesity \nincidence (b)","Combination of (a) and (b)")
+v_legend <- list(c("Baseline","-50%","-100%"), #"-10%",
+                 c("Baseline","-50%","-100%","+35%"),
+                 c("Baseline","No obesity","-50%(a) & +35%(b)","-100%(a) & +35%(b)"))
+#v_col_legend <- c("green","red")
+
+
+m <- matrix(data = c(1,2,0,
+                     6,9,3,
+                     7,10,4,
+                    8,11,5),4,3,byrow = TRUE)
+
+
+png(file = paste(wd,"/Scenarios_results_DMprev_ATTICA_Adjusted",plotsex,".png",sep=""),width = 8, height = 10, units = "in", res = 96)
+#setEPS()
+#postscript(paste(wd,"/Scenarios_results_Female.eps",sep=""),width = 10, height = 12)
+
+par(oma=c(3,3,0,0))
+layout(m, widths = c(15,20,2), heights = c(1,rep(9,3)) )
+
+par(mar = c(0, 0, 0, 0))
+
+for (i in 1:2) {
+  plot.new()
+  text(x=0.55,y=0.5,labels = v_label[i],xpd = F,cex = 1.2,font = 2)
+  box(col = "grey",which = "figure")
+}
+
+for (i in 3:5) {
+  plot.new()
+  text(x=0.5,y=0.5,labels = v_label[i],xpd = F,srt = 90,cex = 1.7,font = 2)
+  box(col = "grey",which = "figure")
+}
+
+
+par(mar = c(2.5, 3, 1, 0.5)) #mar=c(5.1, 4.1, 4.1, 2.1)
+for (w in 1:2) {
+  for (i in 1:3) {
+    
+    sub <- plot[plot$what == what[v_what[w]] & plot$sex == plotsex & plot$typeof == names.plots[i],]
+    if (i == 1) {
+      which_col <- expression(`prevalence change`)
+      which_i <- levels(sub$`prevalence change`)
+      } else {
+        which_col <- expression(`risk change`)
+        which_i <- levels(sub$`risk change`)
+      }
+    
+    v_lty <- c(1,3,2,4,3)
+    
+    #if (i==3) {
+     # v_lty <- v_lty[-2]
+    #} 
+  
+  with(sub,{
+     plot(x=age[eval(which_col) == "Baseline"], 
+          y = value[eval(which_col) == "Baseline"], 
+          type = "l",
+          lwd = 3,
+          ylim = range(c(0,v_ylim[w])),
+          xlab = "",ylab = "",
+          cex.axis = 1.3)
+    for (ii in 2:length(which_i)) {
+      n <- length(age[eval(which_col) == which_i[ii]])
+      v_seq <- eval(ifelse(n>81,expression(c(81,162)),81))
+      for (iii in v_seq) {
+        lines(x = age[eval(which_col) == which_i[ii]][(iii-80):iii], 
+              y = value[eval(which_col) == which_i[ii]][(iii-80):iii],
+              type="l",
+              lty = ifelse(iii==162,3,v_lty[ii]), 
+              pch = ii, 
+              #col = ifelse(which_i[ii] == "+35%","dark red","dark green"),
+              lwd = 2)
+    }
+    grid()
+    box(col = "grey",which = "figure")
+
+    
+    if (w!=1) {
+          
+    legend("topleft",title = v_title[i],legend = v_legend[[i]], cex = 1.1, 
+           lty = eval(ifelse(i==3,expression(v_lty[-2]),expression(v_lty))),
+           bg="transparent",
+           bty = "n",
+           inset = ifelse(i!=3,0.04,0),
+           #col = c("black","dark green",paste("dark",v_col_legend[ifelse(i!=3,1,2)]),"dark red"),
+           lwd = 2)
+      }
+      }
+    })
+  }
+}
+
+mtext("Age (years)",side=1,line=0.8,outer=TRUE,cex=1.2)
+mtext("Prevalence (%)",side=2,line=0.8,outer=TRUE,cex=1.2,las = 0)
+
+#plot.new()
+#legend("center",legend=c("-10%","-50%","-100%"), title = "Legend \nReduction of \nprevalence (a)")
+
+dev.off()
+
+
+```
+
+```{r Prevalence - conditional on survival}
+names.plots.figure <- c("Childhood \nScenario","Adulthood \nScenario","Combination \nScenario")
+v_ylim <- c(80,50) 
+v_what <- c(5,1)
+plotsex <- "Male"
+v_label <- c("Prevalence of unhealthy BMI","Diabetes mellitus prevalence",names.plots.figure)
+v_title <- c("Reduction of obesity \nprevalence at 20 (a)","Change in obesity \nincidence (b)","Combination of (a) and (b)")
+v_legend <- list(c("Baseline","-50%","-100%"), #"-10%",
+                 c("Baseline","-50%","-100%","+35%"),
+                 c("Baseline","No obesity","-50%(a) & +35%(b)","-100%(a) & +35%(b)"))
+#v_col_legend <- c("green","red")
+
+
+m <- matrix(data = c(1,2,0,
+                     6,9,3,
+                     7,10,4,
+                    8,11,5),4,3,byrow = TRUE)
+
+
+png(file = paste(wd,"/Scenarios_results_DMprevalive_ATTICA_",plotsex,".png",sep=""),width = 8, height = 10, units = "in", res = 96)
+#setEPS()
+#postscript(paste(wd,"/Scenarios_results_Female.eps",sep=""),width = 10, height = 12)
+
+par(oma=c(3,3,0,0))
+layout(m, widths = c(15,20,2), heights = c(1,rep(9,3)) )
+
+par(mar = c(0, 0, 0, 0))
+
+for (i in 1:2) {
+  plot.new()
+  text(x=0.55,y=0.5,labels = v_label[i],xpd = F,cex = 1.2,font = 2)
+  box(col = "grey",which = "figure")
+}
+
+for (i in 3:5) {
+  plot.new()
+  text(x=0.5,y=0.5,labels = v_label[i],xpd = F,srt = 90,cex = 1.7,font = 2)
+  box(col = "grey",which = "figure")
+}
+
+
+par(mar = c(2.5, 3, 1, 0.5)) #mar=c(5.1, 4.1, 4.1, 2.1)
+for (w in 1:2) {
+  for (i in 1:3) {
+    
+    sub <- plot[plot$what == what[v_what[w]] & plot$sex == plotsex & plot$typeof == names.plots[i],]
+    if (i == 1) {
+      which_col <- expression(`prevalence change`)
+      which_i <- levels(sub$`prevalence change`)
+      } else {
+        which_col <- expression(`risk change`)
+        which_i <- levels(sub$`risk change`)
+      }
+    
+    v_lty <- c(1,3,2,4,3)
+    
+    #if (i==3) {
+     # v_lty <- v_lty[-2]
+    #} 
+  
+  with(sub,{
+     plot(x=age[eval(which_col) == "Baseline"], 
+          y = value[eval(which_col) == "Baseline"], 
+          type = "l",
+          lwd = 3,
+          ylim = range(c(0,v_ylim[w])),
+          xlab = "",ylab = "",
+          cex.axis = 1.3)
+    for (ii in 2:length(which_i)) {
+      n <- length(age[eval(which_col) == which_i[ii]])
+      v_seq <- eval(ifelse(n>81,expression(c(81,162)),81))
+      for (iii in v_seq) {
+        lines(x = age[eval(which_col) == which_i[ii]][(iii-80):iii], 
+              y = value[eval(which_col) == which_i[ii]][(iii-80):iii],
+              type="l",
+              lty = ifelse(iii==162,3,v_lty[ii]), 
+              pch = ii, 
+              #col = ifelse(which_i[ii] == "+35%","dark red","dark green"),
+              lwd = 2)
+    }
+    grid()
+    box(col = "grey",which = "figure")
+
+    
+    if (w!=1) {
+          
+    legend("topleft",title = v_title[i],legend = v_legend[[i]], cex = 1.1, 
+           lty = eval(ifelse(i==3,expression(v_lty[-2]),expression(v_lty))),
+           bg="transparent",
+           bty = "n",
+           inset = ifelse(i!=3,0.04,0),
+           #col = c("black","dark green",paste("dark",v_col_legend[ifelse(i!=3,1,2)]),"dark red"),
+           lwd = 2)
+      }
+      }
+    })
+  }
+}
+
+mtext("Age (years)",side=1,line=0.8,outer=TRUE,cex=1.2)
+mtext("Prevalence (%)",side=2,line=0.8,outer=TRUE,cex=1.2,las = 0)
+
+dev.off()
+
+
+```
+
+
+#04 Review transition probabilities
+
+```{r Plot transition probabilities - for paper}
+P_array <- readRDS(file= paste(wd,"P_array.RData",sep="")) #dim=c(3,3,age,year,BMI,sex)
+M_array <- readRDS(file = paste(wd,"P1matrix_Male_2022.RData",sep=""))
+M <- M_array[["E.trans.prob"]]
+
+start_state <- c(2,3)
+end_state <- c(1,2)
+start_state_name <- c("normal weight","overweight")
+end_state_name <- c("overweight","obese")
+
+gender <- "Male"
+
+
+png(filename = "Transition_Matrices_Male.png",width = 700, height = 400) #,width = 650, height = 600
+
+m <- matrix(c(1,2,3,7,4,5,6,8),nrow = 2,ncol = 4,byrow = TRUE)
+layout(mat = m,heights = c(0.5,0.5),widths  = c(1,1,1,0.5))
+
+for (i in 1:2) {
+  plot(x = 20:99,
+     y = M[start_state[i],end_state[i],], type="l",lwd=2,
+     ylab = "p(BMI transition)",
+     xlab = "Age (years)", 
+     main = paste(start_state_name[i],"to",end_state_name[i]),
+     cex=1.2,
+     cex.axis = 1.2,
+     cex.lab = 1.2,
+     cex.main = 1.3)
+  grid()  
+}
+
+start_state <- c(1,2,1)
+end_state <- c(2,3,3)
+start_state_name <- c("healthy","alive(no)","alive(ow)","alive(ob)")
+end_state_name <- c("diabetic","dead","dead","dead")
+
+i=1
+plot(x = 20:100,
+       y = P_array[start_state[i],end_state[i],,"2022","no",gender],
+       type="l",lwd=2,
+       ylab = "p(HS transition)",
+       xlab = "Age (years)", 
+       main = paste(start_state_name[i],"to",end_state_name[i]),cex=1.2,
+       ylim = range(c(P_array[start_state[i],end_state[i],,"2022","no",gender],
+                      P_array[start_state[i],end_state[i],,"2022","ob",gender])),
+       cex.axis = 1.2,
+       cex.lab = 1.2,
+       cex.main = 1.3,
+       col = "dark green")
+lines(x = 20:100,y = P_array[start_state[i],end_state[i],,"2022","ow",gender],col="dark blue",lwd=2)
+lines(x = 20:100,y = P_array[start_state[i],end_state[i],,"2022","ob",gender],col="dark red",lwd=2)
+  grid()
+
+for (i in 1:3) {
+  plot(x = 20:100,
+       y = log(P_array[start_state[2],end_state[2],,"2022",i,gender]),
+       type="l",lwd=2,
+       ylab = "log(p(HS transition))",
+       xlab = "Age (years)", 
+       main = paste(start_state_name[i+1],"to",end_state_name[i+1]),cex=1.2,
+       ylim = range(c(log(P_array[start_state[2],end_state[2],,"2022",i,gender]),
+                      log(P_array[start_state[3],end_state[3],,"2022",i,gender]))),
+       cex.axis = 1.2,
+       cex.lab = 1.2,
+       cex.main = 1.3,
+       col = "dark red")
+       #log='y')
+  lines(x = 20:100,y = log(P_array[start_state[3],end_state[3],,"2022",i,gender]),col="black",lwd=2)
+  grid()
+}
+par(mar=c(0,0,0,0))
+plot(1, type = "n", axes=FALSE, xlab="", ylab="")
+legend(x="center",
+       legend = c("b/n BMI states","normal weight","overweight","obese"),
+       fill = c("black","dark green","dark blue","dark red"),title="Transitions Legend",cex=1.2)
+par(mar=c(0,0,0,0))
+plot(1, type = "n", axes=FALSE, xlab="", ylab="")
+legend(x="center",legend=c("healthy","diabetic"),
+       fill=c("black","dark red"), title="Transitions Legend",cex=1.3)
+dev.off()
+
+```
+
+
+```{r Plot transition probabilities - for Appendix}
+P_array <- readRDS(file= paste(wd,"P_array.RData",sep="")) #dim=c(3,3,age,year,BMI,sex)
+sex <- c("Female","Male")
+s <- 2
+
+start_state_name <- c("healthy","healthy","healthy","diabetic","diabetic")
+end_state_name <- c("healthy","diabetic","dead","diabetic","dead")
+
+png(filename = paste("P_Matrix_",sex[s],".png",sep=""),width = 800, height = 400) #,width = 650, height = 600
+
+m <- matrix(1:6,nrow = 2,ncol = 3,byrow = TRUE)
+layout(mat = m,heights = c(0.5,0.5,0.5),widths  = c(0.5,0.5,0.5))
+
+for (i in 1:5) {
+  plot(x = 20:100,
+     y = P_array[start_state_name[i],end_state_name[i],,"2022","no",sex[s]],
+     ylim = range(c(P_array[start_state_name[i],end_state_name[i],,"2022","no",sex[s]],
+                    P_array[start_state_name[i],end_state_name[i],,"2022","ob",sex[s]])),
+     type = "l", col = "dark green",
+     main = paste(start_state_name[i],"to",end_state_name[i]),
+     ylab = "Transition probability",
+     xlab = "Age (years)",
+     lwd = 2,
+     cex.lab = 1.5,
+     cex.axis = 1.5,
+     cex.main = 1.6)
+  lines(x = 20:100,y = P_array[start_state_name[i],end_state_name[i],,"2022","ow",sex[s]], col = "dark blue",lwd = 2)
+  lines(x = 20:100,y = P_array[start_state_name[i],end_state_name[i],,"2022","ob",sex[s]], col = "dark red",lwd = 2)
+  grid()
+}
+par(mar=c(0,0,0,0))
+plot(1, type = "n", axes=FALSE, xlab="", ylab="")
+legend(x="center",legend=c("normal BMI","overweight","obese"),
+       fill=c("dark green","dark blue","dark red"), title="Legend",cex=1.5)
+dev.off()
+
+```
