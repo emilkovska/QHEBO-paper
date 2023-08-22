@@ -3,7 +3,7 @@
 getModelTransitions <- function(sens_analysis = FALSE, what = NULL, change = NULL, inc_adjust = NULL) { #what: 1- mortality, 2-diab prevalence 3-diab incidence 4-RR 5-SMR
   
   bmi <- read.csv(paste(wd,"data/NCD_RisC_Lancet_smooth_2030_Bulgaria.csv",sep=""))
-  names(bmi) <- c("X","year","sex","age","p_ow","log.se.ow","p_ob","log.se.ob","p_no")
+  names(bmi) <- c("X","year","sex","age","p_ow","p_ob","log.se.ob","log.se.ow","p_no")
   H.dimnames <- c("healthy","diabetic","dead")
   v_years <- unique(bmi$year)
   v_bmis <- c("no","ow","ob")
